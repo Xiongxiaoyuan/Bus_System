@@ -1,0 +1,26 @@
+### 测试上报 - 车 1001 到起点站
+POST http://localhost:3000/api/report
+Content-Type: application/json
+
+{
+  "busId": "1001",
+  "stationId": "S001"
+}
+
+### 车 1001 到中间站
+POST http://localhost:3000/api/report
+Content-Type: application/json
+
+{
+  "busId": "1001",
+  "stationId": "S002"
+}
+
+### 查询所有车辆
+GET http://localhost:3000/api/buses
+
+### 查询站点
+GET http://localhost:3000/api/stations
+
+### 查询 ETA
+GET http://localhost:3000/api/eta/1001

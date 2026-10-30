@@ -49,7 +49,8 @@ import RouteMap from './components/RouteMap.vue'
 
 const buses = ref([])
 const stations = ref([])
-const segments = ref([])      // ← 新增：每段路的距离/速度/拥堵
+// { forward: [], backward: [] }
+const segments = ref({ forward: [], backward: [] })
 const connected = ref(false)
 const currentTime = ref('')
 
@@ -65,7 +66,13 @@ async function loadData() {
     ])
 
     const list = busRes.data.data || []
-    segments.value = segRes.data.data || []
+
+    // 新后端：{ code, data: forward[], backward: [] }
+    // 老后端：{ code, data: [] }，此时反向复用正向数组
+    const body = segRes.data || {}
+    const forward = Array.isArray(body.data) ? body.data : []
+    const backward = Array.isArray(body.backward) ? body.backward : forward
+    segments.value = { forward, backward }
 
     const etaResults = await Promise.all(
       list.map(bus =>
@@ -127,7 +134,6 @@ body {
 }
 .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
-/* 顶部导航栏保持不变 */
 .topbar {
   height: 64px;
   background: linear-gradient(90deg, #0f172a 0%, #1e3a8a 40%, #2563eb 70%, #3b82f6 100%);
