@@ -35,19 +35,14 @@ const RECENT_N = 5;
 
 // ============ 拥堵 ============
 function getCongestionLevel(speedKmh) {
-  // 【演示特供版】由于距离缩小了10倍，为了保持速度逻辑合理性，我们将阈值也缩小10倍
-  // 畅通：>= 2.5 km/h (现实中的 25 km/h)
-  // 缓行：1.0 ~ 2.5 km/h (现实中的 10~25 km/h)
-  // 拥堵：< 1.0 km/h (现实中的 10 km/h 以下)
-  
   if (speedKmh >= 2.5) return { level: 'smooth', label: '畅通', color: '#22c55e' };
   if (speedKmh >= 1.0) return { level: 'slow',   label: '缓行', color: '#f59e0b' };
   return                      { level: 'jam',    label: '拥堵', color: '#ef4444' };
 }
 
 function getCongestionCode(speedKmh) {
-  if (speedKmh >= 4.0) return 0;
-  if (speedKmh >= 3.0) return 1;
+  if (speedKmh >= 2.5) return 0;
+  if (speedKmh >= 1.0) return 1;
   return 2;
 }
 
@@ -116,30 +111,20 @@ function formatDuration(sec) {
   return m > 0 ? `约${h}小时${m}分钟` : `约${h}小时`;
 }
 
-// 计算某车到某站的最短耗时（双向取最小）
 async function getBusToStationSeconds(busStationIndex, targetIndex, stations) {
-  if (busStationIndex === targetIndex) {
-    return { seconds: 0, pathDirection: 'same' };
-  }
-
+  if (busStationIndex === targetIndex) return { seconds: 0, pathDirection: 'same' };
   let forwardSeconds = 0;
   if (busStationIndex < targetIndex) {
     for (let i = busStationIndex; i < targetIndex; i++) {
       forwardSeconds += await getSegmentSeconds(stations[i].id, stations[i + 1].id);
     }
-  } else {
-    forwardSeconds = Infinity;
-  }
-
+  } else { forwardSeconds = Infinity; }
   let backwardSeconds = 0;
   if (busStationIndex > targetIndex) {
     for (let i = busStationIndex; i > targetIndex; i--) {
       backwardSeconds += await getSegmentSeconds(stations[i].id, stations[i - 1].id);
     }
-  } else {
-    backwardSeconds = Infinity;
-  }
-
+  } else { backwardSeconds = Infinity; }
   return forwardSeconds <= backwardSeconds
     ? { seconds: forwardSeconds, pathDirection: 'forward' }
     : { seconds: backwardSeconds, pathDirection: 'backward' };
@@ -150,55 +135,40 @@ async function getBusToStationSeconds(busStationIndex, targetIndex, stations) {
 // ============================================================
 app.post('/api/report', async (req, res) => {
   const { busId, stationId } = req.body;
-  if (!busId || !stationId) {
-    return res.status(400).json({ code: 400, msg: '参数错误' });
-  }
+  if (!busId || !stationId) return res.status(400).json({ code: 400, msg: '参数错误' });
 
   try {
     const now = new Date();
-    const [stationRows] = await pool.query(
-      'SELECT * FROM stations WHERE id = ?', [stationId]
-    );
-    if (stationRows.length === 0) {
-      return res.status(400).json({ code: 400, msg: '站点不存在' });
-    }
+    const [stationRows] = await pool.query('SELECT * FROM stations WHERE id = ?', [stationId]);
+    if (stationRows.length === 0) return res.status(400).json({ code: 400, msg: '站点不存在' });
     const station = stationRows[0];
 
-    const [prevRows] = await pool.query(
-      'SELECT * FROM bus_status WHERE bus_id = ?', [busId]
-    );
+    const [prevRows] = await pool.query('SELECT * FROM bus_status WHERE bus_id = ?', [busId]);
     const prev = prevRows[0];
 
     if (prev && prev.station_id !== stationId) {
-      const [prevStationRows] = await pool.query(
-        'SELECT * FROM stations WHERE id = ?', [prev.station_id]
-      );
+      const [prevStationRows] = await pool.query('SELECT * FROM stations WHERE id = ?', [prev.station_id]);
       if (prevStationRows.length > 0) {
         const prevStation = prevStationRows[0];
         if (station.sort_index !== prevStation.sort_index) {
           const duration = now - new Date(prev.arrival_time);
           await pool.query(
-            `INSERT INTO segment_history (from_station, to_station, duration_ms)
-             VALUES (?, ?, ?)`,
+            `INSERT INTO segment_history (from_station, to_station, duration_ms) VALUES (?, ?, ?)`,
             [prev.station_id, stationId, duration]
           );
-          console.log(`[历史] ${prev.station_id}->${stationId} 耗时 ${Math.round(duration / 1000)} 秒`);
         }
       }
     }
 
     await pool.query(
-      `INSERT INTO arrival_records (bus_id, station_id, arrival_time)
-       VALUES (?, ?, ?)`,
+      `INSERT INTO arrival_records (bus_id, station_id, arrival_time) VALUES (?, ?, ?)`,
       [busId, stationId, now]
     );
 
     await pool.query(
       `INSERT INTO bus_status (bus_id, station_id, arrival_time, line)
        VALUES (?, ?, ?, '1路')
-       ON DUPLICATE KEY UPDATE
-         station_id = VALUES(station_id),
-         arrival_time = VALUES(arrival_time)`,
+       ON DUPLICATE KEY UPDATE station_id = VALUES(station_id), arrival_time = VALUES(arrival_time)`,
       [busId, stationId, now]
     );
 
@@ -211,174 +181,94 @@ app.post('/api/report', async (req, res) => {
 });
 
 // ============================================================
-//                接口 2：查询所有车辆
+//                接口 2~8：各种查询（保持原样）
 // ============================================================
 app.get('/api/buses', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT b.bus_id, b.station_id, s.name AS station_name,
              s.sort_index AS station_index, b.line, b.arrival_time
-      FROM bus_status b
-      JOIN stations s ON b.station_id = s.id
-      ORDER BY b.bus_id
+      FROM bus_status b JOIN stations s ON b.station_id = s.id ORDER BY b.bus_id
     `);
     res.json({ code: 200, data: rows });
-  } catch (err) {
-    res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
-  }
+  } catch (err) { res.status(500).json({ code: 500, msg: '查询失败', error: err.message }); }
 });
 
-// ============================================================
-//                接口 3：查询站点
-// ============================================================
 app.get('/api/stations', async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
     res.json({ code: 200, data: rows });
-  } catch (err) {
-    res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
-  }
+  } catch (err) { res.status(500).json({ code: 500, msg: '查询失败', error: err.message }); }
 });
 
-// ============================================================
-//                接口 4：用户登录 ⭐ 新增
-// ============================================================
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-
-  if (!username || !password) {
-    return res.status(400).json({ code: 400, msg: '用户名和密码不能为空' });
-  }
-
+  if (!username || !password) return res.status(400).json({ code: 400, msg: '用户名和密码不能为空' });
   try {
-    const [rows] = await pool.query(
-      'SELECT username FROM users WHERE username = ? AND password = ?',
-      [username, password]
-    );
-
-    if (rows.length === 0) {
-      return res.status(401).json({ code: 401, msg: '用户名或密码错误' });
-    }
-
-    console.log(`[登录] 用户 ${rows[0].username} 登录成功`);
-    res.json({
-      code: 200,
-      data: { username: rows[0].username },
-    });
-  } catch (err) {
-    console.error('[登录] 失败:', err);
-    res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
-  }
+    const [rows] = await pool.query('SELECT username FROM users WHERE username = ? AND password = ?', [username, password]);
+    if (rows.length === 0) return res.status(401).json({ code: 401, msg: '用户名或密码错误' });
+    res.json({ code: 200, data: { username: rows[0].username } });
+  } catch (err) { res.status(500).json({ code: 500, msg: '服务器错误', error: err.message }); }
 });
 
-// ============================================================
-//        接口 5：查询所有路段
-// ============================================================
 app.get('/api/segments', async (req, res) => {
   try {
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
     const segments = [];
     for (let i = 0; i < stations.length - 1; i++) {
-      const info = await getSegmentInfo(stations[i].id, stations[i + 1].id);
-      segments.push(info);
+      segments.push(await getSegmentInfo(stations[i].id, stations[i + 1].id));
     }
     res.json({ code: 200, data: segments });
-  } catch (err) {
-    res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
-  }
+  } catch (err) { res.status(500).json({ code: 500, msg: '查询失败', error: err.message }); }
 });
 
-// ============================================================
-//        接口 6：某车的 ETA
-// ============================================================
 app.get('/api/eta/:busId', async (req, res) => {
   const { busId } = req.params;
   try {
-    const [statusRows] = await pool.query(
-      `SELECT b.*, s.sort_index FROM bus_status b
-       JOIN stations s ON b.station_id = s.id
-       WHERE b.bus_id = ?`, [busId]
-    );
-    if (statusRows.length === 0) {
-      return res.status(404).json({ code: 404, msg: '车辆不存在' });
-    }
+    const [statusRows] = await pool.query(`SELECT b.*, s.sort_index FROM bus_status b JOIN stations s ON b.station_id = s.id WHERE b.bus_id = ?`, [busId]);
+    if (statusRows.length === 0) return res.status(404).json({ code: 404, msg: '车辆不存在' });
     const current = statusRows[0];
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
 
     const now = Date.now();
     const etas = [];
     let cumulative = 0;
-
     for (let i = current.sort_index; i < stations.length - 1; i++) {
-      const from = stations[i];
-      const to = stations[i + 1];
+      const from = stations[i]; const to = stations[i + 1];
       const info = await getSegmentInfo(from.id, to.id);
       cumulative += info.avg_time_ms;
-
       const arriveAt = new Date(now + cumulative);
       const pad = n => String(n).padStart(2, '0');
-
       etas.push({
-        stationId: to.id,
-        stationName: to.name,
-        etaMinutes: Math.round(cumulative / 60000),
-        etaSeconds: Math.round(cumulative / 1000),
+        stationId: to.id, stationName: to.name,
+        etaMinutes: Math.round(cumulative / 60000), etaSeconds: Math.round(cumulative / 1000),
         arriveTime: `${pad(arriveAt.getHours())}:${pad(arriveAt.getMinutes())}`,
-        segment: {
-          distance_m: info.distance_m,
-          speed_kmh: info.speed_kmh,
-          congestion: info.congestion,
-        },
+        segment: { distance_m: info.distance_m, speed_kmh: info.speed_kmh, congestion: info.congestion },
       });
     }
-
     res.json({ code: 200, data: etas });
-  } catch (err) {
-    res.status(500).json({ code: 500, msg: '计算失败', error: err.message });
-  }
+  } catch (err) { res.status(500).json({ code: 500, msg: '计算失败', error: err.message }); }
 });
 
-// ============================================================
-//        接口 7：按起点终点查询 ETA
-// ============================================================
 app.get('/api/estimate', async (req, res) => {
   const { from, to } = req.query;
-
-  if (!from || !to) {
-    return res.status(400).json({ code: 400, msg: '缺少 from 或 to 参数' });
-  }
-  if (from === to) {
-    return res.status(400).json({ code: 400, msg: '起点和终点不能相同' });
-  }
-
+  if (!from || !to) return res.status(400).json({ code: 400, msg: '缺少 from 或 to 参数' });
+  if (from === to) return res.status(400).json({ code: 400, msg: '起点和终点不能相同' });
   try {
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
-    const stationMap = {};
-    stations.forEach(s => { stationMap[s.id] = s; });
-
-    const fromStation = stationMap[from];
-    const toStation = stationMap[to];
-    if (!fromStation || !toStation) {
-      return res.status(400).json({ code: 400, msg: '站点不存在' });
-    }
+    const stationMap = {}; stations.forEach(s => { stationMap[s.id] = s; });
+    const fromStation = stationMap[from]; const toStation = stationMap[to];
+    if (!fromStation || !toStation) return res.status(400).json({ code: 400, msg: '站点不存在' });
 
     const direction = toStation.sort_index > fromStation.sort_index ? 'forward' : 'backward';
-    console.log(`[ETA] ${from} → ${to}  方向：${direction}`);
-
     const segmentIds = [];
     if (direction === 'forward') {
-      for (let i = fromStation.sort_index; i < toStation.sort_index; i++) {
-        segmentIds.push({ from: stations[i].id, to: stations[i + 1].id });
-      }
+      for (let i = fromStation.sort_index; i < toStation.sort_index; i++) segmentIds.push({ from: stations[i].id, to: stations[i + 1].id });
     } else {
-      for (let i = fromStation.sort_index; i > toStation.sort_index; i--) {
-        segmentIds.push({ from: stations[i].id, to: stations[i - 1].id });
-      }
+      for (let i = fromStation.sort_index; i > toStation.sort_index; i--) segmentIds.push({ from: stations[i].id, to: stations[i - 1].id });
     }
 
-    const segments = [];
-    let totalSeconds = 0;
-
+    const segments = []; let totalSeconds = 0;
     for (const seg of segmentIds) {
       const seconds = await getSegmentSeconds(seg.from, seg.to);
       const speedKmh = await getSegmentSpeed(seg.from, seg.to, seconds);
@@ -387,23 +277,12 @@ app.get('/api/estimate', async (req, res) => {
       totalSeconds += seconds;
     }
 
-    // 找最早能到起点站的车
-    let nextBusId = null;
-    let nextDepartureSeconds = Infinity;
-
-    const [allBuses] = await pool.query(`
-      SELECT b.bus_id, b.station_id, s.sort_index AS station_index
-      FROM bus_status b
-      JOIN stations s ON b.station_id = s.id
-    `);
-
+    let nextBusId = null; let nextDepartureSeconds = Infinity;
+    const [allBuses] = await pool.query(`SELECT b.bus_id, b.station_id, s.sort_index AS station_index FROM bus_status b JOIN stations s ON b.station_id = s.id`);
     for (const bus of allBuses) {
-      const { seconds: busToStartSeconds } = await getBusToStationSeconds(
-        bus.station_index, fromStation.sort_index, stations
-      );
+      const { seconds: busToStartSeconds } = await getBusToStationSeconds(bus.station_index, fromStation.sort_index, stations);
       if (busToStartSeconds < nextDepartureSeconds) {
-        nextDepartureSeconds = busToStartSeconds;
-        nextBusId = bus.bus_id;
+        nextDepartureSeconds = busToStartSeconds; nextBusId = bus.bus_id;
       }
     }
 
@@ -414,65 +293,46 @@ app.get('/api/estimate', async (req, res) => {
       nextDeparture = `${pad(arrival.getHours())}:${pad(arrival.getMinutes())}`;
     }
 
-    const finalTotalSeconds = (nextDepartureSeconds !== Infinity ? nextDepartureSeconds : 0)
-                              + totalSeconds;
+    const finalTotalSeconds = (nextDepartureSeconds !== Infinity ? nextDepartureSeconds : 0) + totalSeconds;
+    res.json({ code: 200, data: { next_bus_id: nextBusId, next_departure: nextDeparture, estimated_seconds: finalTotalSeconds, estimated_text: formatDuration(finalTotalSeconds), segments } });
+  } catch (err) { res.status(500).json({ code: 500, msg: '服务器错误', error: err.message }); }
+});
 
-    const estimatedText = formatDuration(finalTotalSeconds);
+app.get('/api/history/:busId', async (req, res) => {
+  const { busId } = req.params;
+  try {
+    const [rows] = await pool.query(`SELECT a.*, s.name AS station_name FROM arrival_records a JOIN stations s ON a.station_id = s.id WHERE a.bus_id = ? ORDER BY a.arrival_time DESC LIMIT 50`, [busId]);
+    res.json({ code: 200, data: rows });
+  } catch (err) { res.status(500).json({ code: 500, msg: '查询失败', error: err.message }); }
+});
 
-    res.json({
-      code: 200,
-      data: {
-        next_bus_id: nextBusId,
-        next_departure: nextDeparture,
-        estimated_seconds: finalTotalSeconds,
-        estimated_text: estimatedText,
-        segments,
-      }
-    });
+// ============================================================
+//                接口 9：清空历史数据（保留车辆位置）
+// ============================================================
+app.delete('/api/history/clear', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM arrival_records');
+    await pool.query('DELETE FROM segment_history');
+    console.log('🧹 [系统] 历史数据已清空（保留车辆位置）');
+    res.json({ code: 200, msg: '历史数据清空成功' });
   } catch (err) {
-    console.error('[estimate] 失败:', err);
+    console.error('清空数据失败:', err);
     res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
   }
 });
 
 // ============================================================
-//                接口 8：历史记录
+//                接口 10：彻底重置（清空车辆 + 历史） ⭐ 新增
 // ============================================================
-app.get('/api/history/:busId', async (req, res) => {
-  const { busId } = req.params;
+app.delete('/api/reset/all', async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      `SELECT a.*, s.name AS station_name
-       FROM arrival_records a
-       JOIN stations s ON a.station_id = s.id
-       WHERE a.bus_id = ?
-       ORDER BY a.arrival_time DESC
-       LIMIT 50`, [busId]
-    );
-    res.json({ code: 200, data: rows });
+    await pool.query('DELETE FROM arrival_records');
+    await pool.query('DELETE FROM segment_history');
+    await pool.query('DELETE FROM bus_status'); // 连车辆也一起删掉
+    console.log('🔄 [系统] 车辆状态和历史数据已全部重置');
+    res.json({ code: 200, msg: '彻底重置成功' });
   } catch (err) {
-    res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
-  }
-});
-
-// ============================================================
-//                接口 9：清空历史数据 ⭐ 新增
-// ============================================================
-app.delete('/api/history/clear', async (req, res) => {
-  try {
-    // 使用 TRUNCATE 可以清空表数据，并且重置自增 ID，速度比 DELETE 更快
-    // 1. 清空历史到站记录表
-    await pool.query('TRUNCATE TABLE arrival_records');
-    
-    // 2. 清空路段历史耗时表（保证拥堵计算重新开始）
-    await pool.query('TRUNCATE TABLE segment_history');
-    
-    // 注意：千万不要清空 bus_status 表，否则车辆位置会全部消失！
-
-    console.log('🧹 [系统] 历史数据已清空');
-    res.json({ code: 200, msg: '历史数据清空成功' });
-  } catch (err) {
-    console.error('清空数据失败:', err);
+    console.error('重置失败:', err);
     res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
   }
 });
@@ -483,7 +343,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ code: 500, msg: '服务器内部错误，请稍后再试' });
 });
 
-// ============ 启动 ============
 app.listen(3000, () => {
   console.log('🚀 后端已启动: http://localhost:3000');
 });
