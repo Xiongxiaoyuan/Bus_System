@@ -455,6 +455,28 @@ app.get('/api/history/:busId', async (req, res) => {
   }
 });
 
+// ============================================================
+//                接口 9：清空历史数据 ⭐ 新增
+// ============================================================
+app.delete('/api/history/clear', async (req, res) => {
+  try {
+    // 使用 TRUNCATE 可以清空表数据，并且重置自增 ID，速度比 DELETE 更快
+    // 1. 清空历史到站记录表
+    await pool.query('TRUNCATE TABLE arrival_records');
+    
+    // 2. 清空路段历史耗时表（保证拥堵计算重新开始）
+    await pool.query('TRUNCATE TABLE segment_history');
+    
+    // 注意：千万不要清空 bus_status 表，否则车辆位置会全部消失！
+
+    console.log('🧹 [系统] 历史数据已清空');
+    res.json({ code: 200, msg: '历史数据清空成功' });
+  } catch (err) {
+    console.error('清空数据失败:', err);
+    res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
+  }
+});
+
 // 全局错误拦截
 app.use((err, req, res, next) => {
   console.error('🚨 系统发生错误:', err.message);

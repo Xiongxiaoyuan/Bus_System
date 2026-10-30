@@ -1,13 +1,23 @@
 <template>
   <aside class="sidebar">
-    <div class="sidebar-header">
+     <div class="sidebar-header">
       <div class="header-title">
         <span class="icon">🚍</span>
         <span>车辆实时状态</span>
       </div>
-      <button class="refresh-btn" @click="$emit('refresh')">
-        <span>⟳</span>
-      </button>
+      
+      <!-- ⭐ 新增：按钮组 -->
+      <div class="header-actions">
+        <!-- 清空历史按钮 -->
+        <button class="clear-btn" @click="clearHistory" title="清空历史数据">
+          <span>🗑️</span> 清空
+        </button>
+        
+        <!-- 原来的刷新按钮 -->
+        <button class="refresh-btn" @click="$emit('refresh')">
+          <span>⟳</span>
+        </button>
+      </div>
     </div>
 
     <div class="stats">
@@ -123,13 +133,14 @@
 
 <script setup>
 import { computed } from 'vue'
+import axios from 'axios' // ⭐ 新增：引入 axios
 
 const props = defineProps({
   buses: { type: Array, default: () => [] },
   maxIndex: { type: Number, default: 0 },
 })
 
-defineEmits(['refresh'])
+const emit = defineEmits(['refresh'])
 
 const runningCount = computed(() =>
   props.buses.filter(b => b.station_index < props.maxIndex).length
@@ -143,6 +154,28 @@ function formatTime(ts) {
   const d = new Date(ts)
   const pad = n => String(n).padStart(2, '0')
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+// ⭐ 新增：清空历史数据的函数
+async function clearHistory() {
+  // 加上 confirm 防止误触
+  const confirmClear = window.confirm('确定要清空所有历史到站和耗时数据吗？\n（车辆当前位置不受影响）')
+  if (!confirmClear) return
+
+  try {
+    // 发送 DELETE 请求给后端
+    const res = await axios.delete('/api/history/clear')
+    if (res.data.code === 200) {
+      alert('✅ 历史数据已成功清空！')
+      // 触发父组件的刷新函数，让页面数据立刻同步
+      emit('refresh')
+    } else {
+      alert('清空失败：' + res.data.msg)
+    }
+  } catch (error) {
+    console.error('清空请求失败:', error)
+    alert('❌ 网络请求失败，请检查后端是否启动')
+  }
 }
 </script>
 
@@ -325,4 +358,33 @@ function formatTime(ts) {
   font-weight: 500; border: 1px solid #f1f5f9;
 }
 .arrived-tip span { margin-right: 4px; }
+
+/* ⭐ 新增：按钮组容器样式 */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px; /* 按钮之间的间距 */
+}
+
+/* ⭐ 新增：清空按钮样式 */
+.clear-btn {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: #fef2f2; /* 浅红色背景 */
+  color: #ef4444;      /* 红色字体 */
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.25s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.clear-btn:hover {
+  background: #ef4444; /* 悬停变红底 */
+  color: #fff;         /* 白字 */
+}
 </style>
