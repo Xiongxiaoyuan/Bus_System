@@ -35,14 +35,19 @@ const RECENT_N = 5;
 
 // ============ 拥堵 ============
 function getCongestionLevel(speedKmh) {
-  if (speedKmh >= 25) return { level: 'smooth', label: '畅通', color: '#22c55e' };
-  if (speedKmh >= 10) return { level: 'slow',   label: '缓行', color: '#f59e0b' };
-  return                     { level: 'jam',    label: '拥堵', color: '#ef4444' };
+  // 【演示特供版】由于距离缩小了10倍，为了保持速度逻辑合理性，我们将阈值也缩小10倍
+  // 畅通：>= 2.5 km/h (现实中的 25 km/h)
+  // 缓行：1.0 ~ 2.5 km/h (现实中的 10~25 km/h)
+  // 拥堵：< 1.0 km/h (现实中的 10 km/h 以下)
+  
+  if (speedKmh >= 2.5) return { level: 'smooth', label: '畅通', color: '#22c55e' };
+  if (speedKmh >= 1.0) return { level: 'slow',   label: '缓行', color: '#f59e0b' };
+  return                      { level: 'jam',    label: '拥堵', color: '#ef4444' };
 }
 
 function getCongestionCode(speedKmh) {
-  if (speedKmh >= 40) return 0;
-  if (speedKmh >= 30) return 1;
+  if (speedKmh >= 4.0) return 0;
+  if (speedKmh >= 3.0) return 1;
   return 2;
 }
 
@@ -448,6 +453,12 @@ app.get('/api/history/:busId', async (req, res) => {
   } catch (err) {
     res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
   }
+});
+
+// 全局错误拦截
+app.use((err, req, res, next) => {
+  console.error('🚨 系统发生错误:', err.message);
+  res.status(500).json({ code: 500, msg: '服务器内部错误，请稍后再试' });
 });
 
 // ============ 启动 ============
