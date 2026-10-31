@@ -28,16 +28,16 @@ const pool = mysql.createPool({
   }
 })();
 
-// ============ 常量（默认时长只保留一个真相源）============
+// ============ 常量 ============
 const DEFAULT_SEGMENT_SECONDS = 180;                 // 默认一段 3 分钟
 const DEFAULT_SEGMENT_TIME = DEFAULT_SEGMENT_SECONDS * 1000;
 const RECENT_N = 5;                                  // 取最近 5 次样本
 const MAX_SEGMENT_MS = 30 * 60 * 1000;               // 超过 30 分钟的异常样本丢弃
 
-// ============ 拥堵阈值（唯一真相源，正反向共用）============
+// ============ 拥堵阈值 ============
 const CONGESTION = {
-  SMOOTH_MIN: 2.5,   // ≥ 2.5 km/h 畅通
-  SLOW_MIN:   1.0,   // ≥ 1.0 km/h 缓行，< 1.0 拥堵
+  SMOOTH_MIN: 30,   // ≥ 30 km/h 畅通
+  SLOW_MIN:   15,   // ≥ 15 km/h 缓行，< 15 拥堵
 };
 
 function getCongestionCode(speedKmh) {
@@ -57,7 +57,6 @@ function getCongestionLevel(speedKmh) {
 }
 
 // ============ 段工具 ============
-// 距离：反向没有单独配置时，借用正向距离（同一段路距离相同）
 async function getSegmentDistance(fromId, toId) {
   const [rows] = await pool.query(
     `SELECT distance_m FROM segment_distance
@@ -74,7 +73,6 @@ async function getSegmentDistance(fromId, toId) {
   return reversed.length > 0 ? reversed[0].distance_m : 2000;
 }
 
-// 最近 N 次耗时（严格按 from→to）
 async function getRecentSegmentTime(fromId, toId) {
   const [rows] = await pool.query(
     `SELECT duration_ms FROM segment_history
@@ -109,7 +107,6 @@ async function getSegmentInfo(fromId, toId) {
   };
 }
 
-// 本方向没有实测数据时借用反方向数据，保证地图 / ETA / estimate 三处结论一致
 async function getSegmentInfoFallback(fromId, toId, refFromId, refToId, note) {
   const info = await getSegmentInfo(fromId, toId);
   if (info.has_data) return info;
@@ -182,8 +179,7 @@ async function getBusToStationSeconds(busStationIndex, targetIndex, stations) {
     : { seconds: backwardSeconds, pathDirection: 'backward' };
 }
 
-// ============ 方向判断：最近一条"不同站点"的到站记录 → 当前站 ============
-// 排除与当前站相同的记录，避免同一站重复刷卡把方向误判回 forward
+// 根据最近一条"不同站"的到站记录推断方向（仅用于刷卡上报时更新 direction 字段）
 async function detectDirection(busId, currentSortIndex) {
   const [rows] = await pool.query(
     `SELECT s.sort_index
@@ -201,7 +197,7 @@ async function detectDirection(busId, currentSortIndex) {
 }
 
 // ============================================================
-//                     接口 1：ESP32 上报
+//                     接口：ESP32 上报
 // ============================================================
 app.post('/api/report', async (req, res) => {
   const { busId, stationId } = req.body;
@@ -216,7 +212,6 @@ app.post('/api/report', async (req, res) => {
     const [prevRows] = await pool.query('SELECT * FROM bus_status WHERE bus_id = ?', [busId]);
     const prev = prevRows[0];
 
-    // 只有"换站"才记录 from→to 的耗时（同站重复刷卡不产生样本）
     if (prev && prev.station_id !== stationId) {
       const [prevStationRows] = await pool.query('SELECT * FROM stations WHERE id = ?', [prev.station_id]);
       if (prevStationRows.length > 0) {
@@ -231,7 +226,6 @@ app.post('/api/report', async (req, res) => {
       }
     }
 
-    // 同站重复刷卡不重复写到站记录，保持历史干净
     if (!prev || prev.station_id !== stationId) {
       await pool.query(
         `INSERT INTO arrival_records (bus_id, station_id, arrival_time) VALUES (?, ?, ?)`,
@@ -239,17 +233,21 @@ app.post('/api/report', async (req, res) => {
       );
     }
 
-    // 同站重复刷卡时保留首次到站时间，避免"在站台上多刷几次"把耗时刷没
+    // 换站才重新推断方向；同站重刷保持原方向
+    const direction = (!prev || prev.station_id !== stationId)
+      ? await detectDirection(busId, station.sort_index)
+      : (prev.direction || 'forward');
+
     await pool.query(
-      `INSERT INTO bus_status (bus_id, station_id, arrival_time, line)
-       VALUES (?, ?, ?, '1路')
+      `INSERT INTO bus_status (bus_id, station_id, arrival_time, line, direction)
+       VALUES (?, ?, ?, '1路', ?)
        ON DUPLICATE KEY UPDATE
          arrival_time = IF(station_id = VALUES(station_id), arrival_time, VALUES(arrival_time)),
-         station_id   = VALUES(station_id)`,
-      [busId, stationId, now]
+         station_id   = VALUES(station_id),
+         direction    = VALUES(direction)`,
+      [busId, stationId, now, direction]
     );
 
-    // 终点/起点提示（返回给硬件，硬件可选使用）
     const [stationsAll] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
     const lastIdx = stationsAll.length - 1;
     let tip = null;
@@ -265,50 +263,83 @@ app.post('/api/report', async (req, res) => {
 });
 
 // ============================================================
-//       接口：手动调度（把车移到指定站，模拟折返/调车）
+//       接口：手动调度（修复版）
 // ============================================================
+// 调度 = 把一辆车直接调到指定站，作为下一班的发车起点。
+// 调度不是真实行驶，因此：
+//   1) 不写 arrival_records（不伪造到站历史）
+//   2) 不写 segment_history（不污染路段耗时与拥堵统计）
+//   3) 方向显式写入 direction 字段，不再靠伪造记录翻转：
+//      - 调到起点站 -> forward（下一班去程）
+//      - 调到终点站 -> backward（下一班回程）
+//      - 调到中间站 -> 可用 body.direction 指定，默认保持原方向
+// body: { toStation, direction? }
 app.post('/api/dispatch/:busId', async (req, res) => {
   const { busId } = req.params;
-  const { toStation } = req.body;
+  const { toStation, direction: reqDirection } = req.body || {};
   if (!toStation) return res.status(400).json({ code: 400, msg: '缺少 toStation 参数' });
 
   try {
     const [st] = await pool.query('SELECT * FROM stations WHERE id = ?', [toStation]);
     if (st.length === 0) return res.status(400).json({ code: 400, msg: '目标站不存在' });
+    const targetStation = st[0];
 
-    // 正确做法是"移动车辆"，不是删除车辆
+    const [prevRows] = await pool.query('SELECT * FROM bus_status WHERE bus_id = ?', [busId]);
+    const prev = prevRows[0];
+    if (!prev) return res.status(404).json({ code: 404, msg: '车辆不存在，请先刷卡上报' });
+    if (prev.station_id === toStation) {
+      return res.status(400).json({ code: 400, msg: `车辆 ${busId} 已在 ${targetStation.name}` });
+    }
+
+    // 首末站序号，用于推断默认方向
+    const [idxRows] = await pool.query(
+      'SELECT MIN(sort_index) AS minIdx, MAX(sort_index) AS maxIdx FROM stations'
+    );
+    const { minIdx, maxIdx } = idxRows[0];
+
+    let direction;
+    if (reqDirection === 'forward' || reqDirection === 'backward') {
+      direction = reqDirection;                       // 显式指定优先
+    } else if (targetStation.sort_index === minIdx) {
+      direction = 'forward';                          // 调回起点 -> 去程待发
+    } else if (targetStation.sort_index === maxIdx) {
+      direction = 'backward';                         // 调到终点 -> 回程待发
+    } else {
+      direction = prev.direction || 'forward';        // 中间站保持原方向
+    }
+
+    // 只更新位置、发车时间、方向，不动任何历史表
     await pool.query(
-      `INSERT INTO bus_status (bus_id, station_id, arrival_time, line)
-       VALUES (?, ?, ?, '1路')
-       ON DUPLICATE KEY UPDATE
-         station_id   = VALUES(station_id),
-         arrival_time = VALUES(arrival_time)`,
-      [busId, toStation, new Date()]
+      `UPDATE bus_status
+       SET station_id = ?, arrival_time = NOW(), direction = ?
+       WHERE bus_id = ?`,
+      [toStation, direction, busId]
     );
 
-    // 人工调度后清掉该车旧到站记录，让方向从新位置重新判断
-    await pool.query('DELETE FROM arrival_records WHERE bus_id = ?', [busId]);
-
-    console.log(`🚌 [调度] 车辆 ${busId} 已调至 ${st[0].name}`);
-    res.json({ code: 200, msg: '调度成功' });
+    console.log(`🚌 [调度] 车辆 ${busId} 已成功调度至 ${targetStation.name}（${direction === 'forward' ? '去程' : '回程'}）`);
+    res.json({
+      code: 200,
+      msg: '调度成功',
+      data: { bus_id: busId, to_station: toStation, direction },
+    });
   } catch (err) {
+    console.error('调度失败:', err);
     res.status(500).json({ code: 500, msg: '调度失败', error: err.message });
   }
 });
 
 // ============================================================
-//                接口 2~8：各种查询
+//                接口：查询车辆与站点
 // ============================================================
 app.get('/api/buses', async (req, res) => {
   try {
     const [rows] = await pool.query(`
       SELECT b.bus_id, b.station_id, s.name AS station_name,
-             s.sort_index AS station_index, b.line, b.arrival_time
+             s.sort_index AS station_index, b.line, b.arrival_time, b.direction
       FROM bus_status b JOIN stations s ON b.station_id = s.id ORDER BY b.bus_id
     `);
-    for (const row of rows) {
-      row.direction = await detectDirection(row.bus_id, row.station_index);
-    }
+    // direction 直接读字段；历史数据若无该字段默认 forward
+    rows.forEach(r => { r.direction = r.direction || 'forward'; });
     res.json({ code: 200, data: rows });
   } catch (err) {
     res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
@@ -324,6 +355,9 @@ app.get('/api/stations', async (req, res) => {
   }
 });
 
+// ============================================================
+//                接口：用户登录
+// ============================================================
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ code: 400, msg: '用户名和密码不能为空' });
@@ -339,7 +373,9 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// ============ 路段：正向 + 反向两套（反向缺数据时借用正向）============
+// ============================================================
+//                接口：路段路况
+// ============================================================
 app.get('/api/segments', async (req, res) => {
   try {
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
@@ -366,7 +402,7 @@ app.get('/api/segments', async (req, res) => {
 });
 
 // ============================================================
-//       接口：ETA（分方向，缺数据时借用反向）
+//                接口：ETA 分方向
 // ============================================================
 app.get('/api/eta/:busId', async (req, res) => {
   const { busId } = req.params;
@@ -381,7 +417,8 @@ app.get('/api/eta/:busId', async (req, res) => {
     const current = statusRows[0];
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
 
-    const direction = await detectDirection(busId, current.sort_index);
+    // 方向直接读字段（上报/调度时已写入）
+    const direction = current.direction || 'forward';
     const note = direction === 'forward'
       ? '暂无正向实测，参考反向数据'
       : '暂无反向实测，参考正向数据';
@@ -446,7 +483,7 @@ app.get('/api/eta/:busId', async (req, res) => {
 });
 
 // ============================================================
-//       接口：起终点估算（App 端使用，缺数据时借用反向）
+//                接口：起终点估算
 // ============================================================
 app.get('/api/estimate', async (req, res) => {
   const { from, to } = req.query;
@@ -527,6 +564,9 @@ app.get('/api/estimate', async (req, res) => {
   }
 });
 
+// ============================================================
+//                接口：历史记录与清空
+// ============================================================
 app.get('/api/history/:busId', async (req, res) => {
   const { busId } = req.params;
   try {
@@ -542,7 +582,6 @@ app.get('/api/history/:busId', async (req, res) => {
   }
 });
 
-// ============ 清空历史耗时（保留车辆位置、方向、到站记录）============
 app.delete('/api/history/clear', async (req, res) => {
   try {
     await pool.query('DELETE FROM segment_history');
@@ -554,7 +593,6 @@ app.delete('/api/history/clear', async (req, res) => {
   }
 });
 
-// ============ 彻底重置（车辆 + 历史）============
 app.delete('/api/reset/all', async (req, res) => {
   try {
     await pool.query('DELETE FROM arrival_records');
@@ -565,6 +603,98 @@ app.delete('/api/reset/all', async (req, res) => {
   } catch (err) {
     console.error('重置失败:', err);
     res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
+  }
+});
+
+// ============================================================
+//                接口：数据统计中心（3个接口）
+// ============================================================
+
+// 1. 近 24 小时运行热度
+app.get('/api/stats/heatmap', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT HOUR(arrival_time) AS hour, COUNT(id) AS count
+      FROM arrival_records
+      WHERE arrival_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+      GROUP BY HOUR(arrival_time)
+    `);
+    
+    const currentHour = new Date().getHours();
+    const result = [];
+    for (let i = 23; i >= 0; i--) {
+      const h = (currentHour - i + 24) % 24;
+      const found = rows.find(r => r.hour === h);
+      result.push({ hour: `${h}:00`, count: found ? found.count : 0 });
+    }
+    res.json({ code: 200, data: result });
+  } catch (err) {
+    res.status(500).json({ code: 500, msg: '统计失败', error: err.message });
+  }
+});
+
+// 2. 实时路况占比（修复版）
+// 改为复用 getSegmentInfo / getSegmentInfoFallback，与 /api/segments 同口径：
+//   - 统计"当前"各路段状态（最近 5 次样本均值，异常样本已过滤）
+//   - 距离缺失时走 getSegmentDistance 的反向/默认 2000 米兜底，不会因 INNER JOIN 丢段
+//   - 正反两个方向都计数
+app.get('/api/stats/congestion', async (req, res) => {
+  try {
+    const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
+
+    let smooth = 0, slow = 0, jam = 0;
+    for (let i = 0; i < stations.length - 1; i++) {
+      const s1 = stations[i];
+      const s2 = stations[i + 1];
+
+      const f = await getSegmentInfo(s1.id, s2.id);
+      const b = await getSegmentInfoFallback(s2.id, s1.id, s1.id, s2.id, null);
+
+      for (const seg of [f, b]) {
+        const level = seg.congestion.level;
+        if (level === 'smooth') smooth++;
+        else if (level === 'slow') slow++;
+        else jam++;
+      }
+    }
+
+    res.json({
+      code: 200,
+      data: [
+        { name: '畅通', value: smooth },
+        { name: '缓行', value: slow },
+        { name: '拥堵', value: jam }
+      ]
+    });
+  } catch (err) {
+    res.status(500).json({ code: 500, msg: '统计失败', error: err.message });
+  }
+});
+
+// 3. 路段平均耗时排名（Top 5）——加上异常样本过滤
+app.get('/api/stats/duration', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT from_station, to_station, AVG(duration_ms) AS avg_ms
+      FROM segment_history
+      WHERE duration_ms > 0 AND duration_ms < ?
+      GROUP BY from_station, to_station
+      ORDER BY avg_ms DESC
+      LIMIT 5
+    `, [MAX_SEGMENT_MS]);
+
+    const [stations] = await pool.query('SELECT id, name FROM stations');
+    const stationMap = {};
+    stations.forEach(s => { stationMap[s.id] = s.name; });
+
+    const data = rows.map(r => ({
+      name: `${stationMap[r.from_station] || r.from_station} → ${stationMap[r.to_station] || r.to_station}`,
+      value: Math.round(r.avg_ms / 6000) / 10
+    }));
+
+    res.json({ code: 200, data });
+  } catch (err) {
+    res.status(500).json({ code: 500, msg: '统计失败', error: err.message });
   }
 });
 

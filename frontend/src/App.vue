@@ -9,11 +9,29 @@
         </div>
       </div>
 
+      <!-- 顶部导航菜单 -->
       <div class="topbar-center">
-        <div class="nav-item active">实时监控</div>
-        <div class="nav-item">车辆调度</div>
-        <div class="nav-item">历史轨迹</div>
-        <div class="nav-item">数据统计</div>
+        <div 
+          class="nav-item" 
+          :class="{ active: currentTab === 'monitor' }"
+          @click="currentTab = 'monitor'"
+        >
+          实时监控
+        </div>
+        <div 
+          class="nav-item" 
+          :class="{ active: currentTab === 'history' }"
+          @click="currentTab = 'history'"
+        >
+          历史轨迹
+        </div>
+        <div 
+          class="nav-item" 
+          :class="{ active: currentTab === 'stats' }"
+          @click="currentTab = 'stats'"
+        >
+          数据统计
+        </div>
       </div>
 
       <div class="topbar-right">
@@ -29,14 +47,32 @@
     </header>
 
     <div class="body">
-      <BusList :buses="buses" :maxIndex="maxIndex" @refresh="loadData" />
-      <RouteMap
-        :buses="buses"
-        :stations="stations"
-        :segments="segments"
-        :maxIndex="maxIndex"
-        :connected="connected"
-      />
+      <!-- 1. 实时监控视图 -->
+      <template v-if="currentTab === 'monitor'">
+        <BusList 
+          :buses="buses" 
+          :stationsList="stations"
+          :maxIndex="maxIndex" 
+          @refresh="loadData" 
+        />
+        <RouteMap
+          :buses="buses"
+          :stations="stations"
+          :segments="segments"
+          :maxIndex="maxIndex"
+          :connected="connected"
+        />
+      </template>
+
+      <!-- 2. 历史轨迹视图 -->
+      <template v-else-if="currentTab === 'history'">
+        <HistoryList :buses="buses" />
+      </template>
+
+      <!-- 3. 数据统计视图 -->
+      <template v-else-if="currentTab === 'stats'">
+        <StatisticsPanel :stations="stations" :segments="segments" />
+      </template>
     </div>
   </div>
 </template>
@@ -46,10 +82,13 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import axios from 'axios'
 import BusList from './components/BusList.vue'
 import RouteMap from './components/RouteMap.vue'
+import HistoryList from './components/HistoryList.vue'
+import StatisticsPanel from './components/StatisticsPanel.vue' // 引入图表组件
+
+const currentTab = ref('monitor') // 默认显示实时监控
 
 const buses = ref([])
 const stations = ref([])
-// { forward: [], backward: [] }
 const segments = ref({ forward: [], backward: [] })
 const connected = ref(false)
 const currentTime = ref('')
@@ -66,9 +105,6 @@ async function loadData() {
     ])
 
     const list = busRes.data.data || []
-
-    // 新后端：{ code, data: forward[], backward: [] }
-    // 老后端：{ code, data: [] }，此时反向复用正向数组
     const body = segRes.data || {}
     const forward = Array.isArray(body.data) ? body.data : []
     const backward = Array.isArray(body.backward) ? body.backward : forward

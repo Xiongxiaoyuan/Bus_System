@@ -43,6 +43,7 @@
           :class="isArrived(bus) ? 'gray' : (bus.direction === 'backward' ? 'purple' : 'green')"
         ></div>
 
+        <!-- 固定头部：车辆信息和状态 -->
         <div class="card-header">
           <div class="bus-info">
             <div class="bus-icon">
@@ -53,14 +54,18 @@
               <div class="bus-line">{{ bus.line }}</div>
             </div>
           </div>
-          <div
-            class="status-tag"
-            :class="isArrived(bus) ? 'arrived' : (bus.direction === 'backward' ? 'backward' : 'running')"
-          >
-            {{ statusText(bus) }}
+          <div class="header-right">
+            <div
+              class="status-tag"
+              :class="isArrived(bus) ? 'arrived' : (bus.direction === 'backward' ? 'backward' : 'running')"
+            >
+              {{ statusText(bus) }}
+            </div>
+            <button class="dispatch-btn" @click="openDispatch(bus)" title="手动调度车辆">🚕</button>
           </div>
         </div>
 
+        <!-- 滚动主体：包含当前位置、时间、ETA -->
         <div class="card-body">
           <div class="info-row">
             <span class="info-label">当前位置</span>
@@ -74,28 +79,29 @@
             <span class="info-label">到站时间</span>
             <span class="info-value">{{ formatTime(bus.arrival_time) }}</span>
           </div>
-        </div>
 
-        <div class="eta-section" v-if="bus.etas && bus.etas.length > 0">
-          <div class="eta-title">预计到达</div>
-          <div class="eta-list">
-            <div class="eta-item" v-for="eta in bus.etas" :key="eta.stationId">
-              <span class="eta-station">{{ eta.stationName }}</span>
-              <span class="eta-time">{{ eta.etaMinutes }} 分钟</span>
-              <span
-                class="eta-congestion"
-                :style="{ background: eta.segment.congestion.color }"
-              >
-                {{ eta.segment.congestion.label }} · {{ eta.segment.speed_kmh }}km/h
-              </span>
+          <!-- ETA 区域 -->
+          <div class="eta-section" v-if="bus.etas && bus.etas.length > 0">
+            <div class="eta-title">预计到达</div>
+            <div class="eta-list">
+              <div class="eta-item" v-for="eta in bus.etas" :key="eta.stationId">
+                <span class="eta-station">{{ eta.stationName }}</span>
+                <span class="eta-time">{{ eta.etaMinutes }} 分钟</span>
+                <span
+                  class="eta-congestion"
+                  :style="{ background: eta.segment.congestion.color }"
+                >
+                  {{ eta.segment.congestion.label }}
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="arrived-tip" v-else-if="maxIndex > 0 && bus.station_index >= maxIndex">
-          已到达终点站，等待调度折返
-        </div>
-        <div class="arrived-tip" v-else-if="bus.station_index === 0 && bus.direction === 'backward'">
-          已到达起点站，等待发车
+          <div class="arrived-tip" v-else-if="maxIndex > 0 && bus.station_index >= maxIndex">
+            已到达终点站，等待调度折返
+          </div>
+          <div class="arrived-tip" v-else-if="bus.station_index === 0 && bus.direction === 'backward'">
+            已到达起点站，等待发车
+          </div>
         </div>
       </div>
 
@@ -105,21 +111,67 @@
         <div class="empty-hint">请刷卡后再刷新</div>
       </div>
     </div>
+
+    <!-- 调度弹窗 -->
+    <div v-if="dispatchModal.show" class="modal-overlay" @click.self="dispatchModal.show = false">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>🚕 车辆调度</h3>
+          <button class="close-btn" @click="dispatchModal.show = false">×</button>
+        </div>
+        <div class="modal-body">
+          <p>车辆 ID：<b>{{ dispatchModal.busId }}</b></p>
+          <p class="tip">选择将该车辆调度到哪个站点：</p>
+          <div class="station-select-list">
+            <button 
+              v-for="(st, i) in stationsList" 
+              :key="st.id"
+              class="station-btn"
+              @click="confirmDispatch(st.id)"
+            >
+              {{ i + 1 }}. {{ st.name }} ({{ st.id }})
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </aside>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import axios from 'axios'
 
 const props = defineProps({
   buses: { type: Array, default: () => [] },
+  stationsList: { type: Array, default: () => [] },
   maxIndex: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['refresh'])
 
-// 终点站 或 "回程到达起点站" 都算已到站，避免标签和提示自相矛盾
+const dispatchModal = ref({
+  show: false,
+  busId: null
+})
+
+function openDispatch(bus) {
+  dispatchModal.value = { show: true, busId: bus.bus_id }
+}
+
+async function confirmDispatch(targetStationId) {
+  try {
+    await axios.post(`/api/dispatch/${dispatchModal.value.busId}`, {
+      toStation: targetStationId
+    })
+    dispatchModal.value.show = false
+    emit('refresh')
+  } catch (e) {
+    console.error('调度失败', e)
+    alert('调度失败，请检查网络')
+  }
+}
+
 function isArrived(bus) {
   const idx = bus.station_index ?? 0
   if (props.maxIndex > 0 && idx >= props.maxIndex) return true
@@ -216,12 +268,15 @@ async function resetAll() {
 .btn-clear:hover { background: #fde68a; }
 .btn-reset { background: #fee2e2; color: #b91c1c; }
 .btn-reset:hover { background: #fecaca; }
+
 .bus-list {
   flex: 1; overflow-y: auto; padding: 0 16px 16px;
   display: flex; flex-direction: column; gap: 10px;
 }
 .bus-list::-webkit-scrollbar { width: 6px; }
 .bus-list::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+/* ================= 卡片核心样式修改 ================= */
 .bus-card {
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -229,16 +284,33 @@ async function resetAll() {
   padding: 14px 16px 14px 20px;
   position: relative;
   transition: all 0.25s;
+  
+  /* 限制卡片高度，允许内部滚动 */
+  display: flex;
+  flex-direction: column;
+  max-height: 380px;  /* 可根据需要调小或调大 */
+  flex-shrink: 0;
   overflow: hidden;
 }
+
 .bus-card:hover { box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08); transform: translateY(-1px); }
 .bus-card.arrived { opacity: 0.65; background: #f8fafc; }
 .bus-card.backward { border-color: #ddd6fe; background: #faf5ff; }
+
 .status-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
 .status-bar.green { background: linear-gradient(180deg, #34d399, #059669); }
 .status-bar.purple { background: linear-gradient(180deg, #a78bfa, #7c3aed); }
 .status-bar.gray { background: #cbd5e1; }
-.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+
+/* 头部固定 */
+.card-header { 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: flex-start; 
+  margin-bottom: 12px; 
+  flex-shrink: 0;
+}
+
 .bus-info { display: flex; gap: 10px; align-items: center; }
 .bus-icon {
   width: 38px; height: 38px; border-radius: 10px;
@@ -249,15 +321,41 @@ async function resetAll() {
 .bus-text { display: flex; flex-direction: column; }
 .bus-id { font-size: 15px; font-weight: 700; color: #0f172a; font-family: 'Courier New', monospace; }
 .bus-line { font-size: 11px; color: #64748b; margin-top: 1px; }
-.status-tag { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+
+.header-right { 
+  display: flex; 
+  align-items: center; 
+  gap: 6px; 
+}
+.status-tag { padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .status-tag.running { background: #dcfce7; color: #15803d; }
 .status-tag.backward { background: #ede9fe; color: #6d28d9; }
 .status-tag.arrived { background: #f1f5f9; color: #64748b; }
-.card-body { display: flex; flex-direction: column; gap: 6px; }
+
+.dispatch-btn {
+  background: #f1f5f9; border: none; border-radius: 4px; cursor: pointer;
+  font-size: 14px; padding: 2px 4px; color: #475569; transition: 0.2s;
+  display: flex; align-items: center; justify-content: center;
+}
+.dispatch-btn:hover { background: #e2e8f0; color: #0f172a; }
+
+/* 核心：内容区可滚动 */
+.card-body { 
+  display: flex; 
+  flex-direction: column; 
+  gap: 6px; 
+  overflow-y: auto; 
+  padding-right: 4px;
+}
+.card-body::-webkit-scrollbar { width: 4px; }
+.card-body::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+
 .info-row { display: flex; justify-content: space-between; font-size: 12px; }
 .info-label { color: #94a3b8; }
 .info-value { color: #334155; font-weight: 500; }
-.eta-section { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #e2e8f0; }
+
+/* ETA 和底部提示区 */
+.eta-section { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #e2e8f0; flex-shrink: 0; }
 .eta-title { font-size: 12px; font-weight: 600; color: #1e3a8a; margin-bottom: 8px; }
 .eta-list { display: flex; flex-direction: column; gap: 6px; }
 .eta-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
@@ -275,4 +373,44 @@ async function resetAll() {
 .empty-icon { font-size: 40px; margin-bottom: 10px; }
 .empty-text { font-size: 15px; font-weight: 600; color: #64748b; margin-bottom: 4px; }
 .empty-hint { font-size: 12px; }
+
+/* ====== 调度弹窗样式 ====== */
+.modal-overlay {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.4); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 999;
+}
+.modal-content {
+  background: #fff; width: 300px; border-radius: 16px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+  overflow: hidden; animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-bottom: 1px solid #f1f5f9;
+}
+.modal-header h3 { font-size: 16px; font-weight: 700; color: #0f172a; margin: 0; }
+.close-btn {
+  background: none; border: none; font-size: 20px; color: #94a3b8;
+  cursor: pointer; padding: 0; line-height: 1;
+}
+.close-btn:hover { color: #ef4444; }
+.modal-body { padding: 20px; }
+.modal-body p { font-size: 13px; color: #475569; margin: 0 0 12px 0; }
+.modal-body .tip { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
+.station-select-list { display: flex; flex-direction: column; gap: 8px; }
+.station-btn {
+  padding: 10px; background: #f8fafc; border: 1px solid #e2e8f0;
+  border-radius: 8px; font-size: 13px; color: #1e293b; cursor: pointer;
+  text-align: left; transition: all 0.2s; font-weight: 500;
+}
+.station-btn:hover {
+  background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8;
+  transform: translateX(4px);
+}
 </style>
