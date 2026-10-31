@@ -34,6 +34,15 @@ const DEFAULT_SEGMENT_TIME = DEFAULT_SEGMENT_SECONDS * 1000;
 const RECENT_N = 5;                                  // 取最近 5 次样本
 const MAX_SEGMENT_MS = 30 * 60 * 1000;               // 超过 30 分钟的异常样本丢弃
 
+// ============ 车辆编号映射 ============
+// UID → 短车辆编号（键改成三张卡实际读到的 UID，可刷卡看串口或查 arrival_records）
+const BUS_ID_MAP = {
+  '701D3A5C': 'BUS01',
+  '7004795C': 'BUS02',
+  '70A0915C': 'BUS03',
+  '60B60F5C': 'BUS04',
+};
+
 // ============ 拥堵阈值 ============
 const CONGESTION = {
   SMOOTH_MIN: 30,   // ≥ 30 km/h 畅通
@@ -200,8 +209,9 @@ async function detectDirection(busId, currentSortIndex) {
 //                     接口：ESP32 上报
 // ============================================================
 app.post('/api/report', async (req, res) => {
-  const { busId, stationId } = req.body;
+  let { busId, stationId } = req.body;
   if (!busId || !stationId) return res.status(400).json({ code: 400, msg: '参数错误' });
+  busId = BUS_ID_MAP[busId] || busId;   // UID 转短车辆编号（未登记的卡原样上报）
 
   try {
     const now = new Date();
@@ -263,13 +273,13 @@ app.post('/api/report', async (req, res) => {
 });
 
 // ============================================================
-//       接口：手动调度（修复版）
+//       接口：手动调度
 // ============================================================
 // 调度 = 把一辆车直接调到指定站，作为下一班的发车起点。
 // 调度不是真实行驶，因此：
 //   1) 不写 arrival_records（不伪造到站历史）
 //   2) 不写 segment_history（不污染路段耗时与拥堵统计）
-//   3) 方向显式写入 direction 字段，不再靠伪造记录翻转：
+//   3) 方向显式写入 direction 字段：
 //      - 调到起点站 -> forward（下一班去程）
 //      - 调到终点站 -> backward（下一班回程）
 //      - 调到中间站 -> 可用 body.direction 指定，默认保持原方向
@@ -291,7 +301,6 @@ app.post('/api/dispatch/:busId', async (req, res) => {
       return res.status(400).json({ code: 400, msg: `车辆 ${busId} 已在 ${targetStation.name}` });
     }
 
-    // 首末站序号，用于推断默认方向
     const [idxRows] = await pool.query(
       'SELECT MIN(sort_index) AS minIdx, MAX(sort_index) AS maxIdx FROM stations'
     );
@@ -338,7 +347,6 @@ app.get('/api/buses', async (req, res) => {
              s.sort_index AS station_index, b.line, b.arrival_time, b.direction
       FROM bus_status b JOIN stations s ON b.station_id = s.id ORDER BY b.bus_id
     `);
-    // direction 直接读字段；历史数据若无该字段默认 forward
     rows.forEach(r => { r.direction = r.direction || 'forward'; });
     res.json({ code: 200, data: rows });
   } catch (err) {
@@ -352,6 +360,22 @@ app.get('/api/stations', async (req, res) => {
     res.json({ code: 200, data: rows });
   } catch (err) {
     res.status(500).json({ code: 500, msg: '查询失败', error: err.message });
+  }
+});
+
+// ============================================================
+//                接口：用户注册（新增）
+// ============================================================
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ code: 400, msg: '用户名和密码不能为空' });
+  try {
+    const [rows] = await pool.query('SELECT username FROM users WHERE username = ?', [username]);
+    if (rows.length > 0) return res.status(400).json({ code: 400, msg: '用户名已存在' });
+    await pool.query('INSERT INTO users (username, password) VALUES (?, ?)', [username, password]);
+    res.json({ code: 200, msg: '注册成功' });
+  } catch (err) {
+    res.status(500).json({ code: 500, msg: '服务器错误', error: err.message });
   }
 });
 
@@ -619,7 +643,7 @@ app.get('/api/stats/heatmap', async (req, res) => {
       WHERE arrival_time >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
       GROUP BY HOUR(arrival_time)
     `);
-    
+
     const currentHour = new Date().getHours();
     const result = [];
     for (let i = 23; i >= 0; i--) {
@@ -633,11 +657,7 @@ app.get('/api/stats/heatmap', async (req, res) => {
   }
 });
 
-// 2. 实时路况占比（修复版）
-// 改为复用 getSegmentInfo / getSegmentInfoFallback，与 /api/segments 同口径：
-//   - 统计"当前"各路段状态（最近 5 次样本均值，异常样本已过滤）
-//   - 距离缺失时走 getSegmentDistance 的反向/默认 2000 米兜底，不会因 INNER JOIN 丢段
-//   - 正反两个方向都计数
+// 2. 实时路况占比（与 /api/segments 同口径：当前路段状态，正反向都计数）
 app.get('/api/stats/congestion', async (req, res) => {
   try {
     const [stations] = await pool.query('SELECT * FROM stations ORDER BY sort_index');
@@ -671,7 +691,7 @@ app.get('/api/stats/congestion', async (req, res) => {
   }
 });
 
-// 3. 路段平均耗时排名（Top 5）——加上异常样本过滤
+// 3. 路段平均耗时排名（Top 5）——剔除异常样本
 app.get('/api/stats/duration', async (req, res) => {
   try {
     const [rows] = await pool.query(`
